@@ -15,7 +15,7 @@ mod metrics;
 pub(crate) mod stream;
 mod streams;
 
-use super::Compression;
+use super::{Compression, StreamConfig};
 use crate::base::ActionRoute;
 use crate::{Action, ActionResponse, Config};
 pub use metrics::StreamMetrics;
@@ -49,7 +49,7 @@ pub trait Point: Send + Debug {
 }
 
 pub trait Package: Send + Debug {
-    fn topic(&self) -> Arc<String>;
+    fn config(&self) -> Arc<StreamConfig>;
     fn stream(&self) -> Arc<String>;
     // TODO: Implement a generic Return type that can wrap
     // around custom serialization error types.
