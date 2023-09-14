@@ -70,7 +70,7 @@ pub enum Compression {
     Lz4,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct StreamConfig {
     pub topic: String,
     #[serde(default = "max_buf_size")]
@@ -106,6 +106,12 @@ impl Ord for StreamConfig {
             (Ordering::Equal, o) => o,
             (o, _) => o,
         }
+    }
+}
+
+impl PartialOrd for StreamConfig {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
     }
 }
 
