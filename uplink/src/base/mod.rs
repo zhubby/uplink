@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::env::current_dir;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -34,6 +35,10 @@ fn default_file_size() -> usize {
     10485760 // 10MB
 }
 
+fn default_stream_priority() -> u8 {
+    u8::MAX
+}
+
 fn default_persistence_path() -> PathBuf {
     let mut path = current_dir().expect("Couldn't figure out current directory");
     path.push(".persistence");
@@ -58,14 +63,14 @@ pub fn clock() -> u128 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis()
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq, PartialOrd)]
 pub enum Compression {
     #[default]
     Disabled,
     Lz4,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd)]
 pub struct StreamConfig {
     pub topic: String,
     #[serde(default = "max_buf_size")]
@@ -78,6 +83,8 @@ pub struct StreamConfig {
     pub compression: Compression,
     #[serde(default)]
     pub persistence: Persistence,
+    #[serde(default = "default_stream_priority")]
+    pub priority: u8,
 }
 
 impl Default for StreamConfig {
@@ -88,11 +95,21 @@ impl Default for StreamConfig {
             flush_period: default_timeout(),
             compression: Compression::Disabled,
             persistence: Persistence::default(),
+            priority: default_stream_priority(),
         }
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+impl Ord for StreamConfig {
+    fn cmp(&self, other: &Self) -> Ordering {
+        match (self.priority.cmp(&other.priority), self.topic.cmp(&other.topic)) {
+            (Ordering::Equal, o) => o,
+            (o, _) => o,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq, PartialOrd)]
 pub struct Persistence {
     #[serde(default = "default_file_size")]
     pub max_file_size: usize,
