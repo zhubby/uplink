@@ -35,10 +35,6 @@ fn default_file_size() -> usize {
     10485760 // 10MB
 }
 
-fn default_stream_priority() -> u8 {
-    u8::MAX
-}
-
 fn default_persistence_path() -> PathBuf {
     let mut path = current_dir().expect("Couldn't figure out current directory");
     path.push(".persistence");
@@ -83,7 +79,7 @@ pub struct StreamConfig {
     pub compression: Compression,
     #[serde(default)]
     pub persistence: Persistence,
-    #[serde(default = "default_stream_priority")]
+    #[serde(default)]
     pub priority: u8,
 }
 
@@ -95,7 +91,7 @@ impl Default for StreamConfig {
             flush_period: default_timeout(),
             compression: Compression::Disabled,
             persistence: Persistence::default(),
-            priority: default_stream_priority(),
+            priority: 0,
         }
     }
 }
@@ -104,7 +100,7 @@ impl Ord for StreamConfig {
     fn cmp(&self, other: &Self) -> Ordering {
         match (self.priority.cmp(&other.priority), self.topic.cmp(&other.topic)) {
             (Ordering::Equal, o) => o,
-            (o, _) => o,
+            (o, _) => o.reverse(),
         }
     }
 }
