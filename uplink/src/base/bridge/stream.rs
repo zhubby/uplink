@@ -273,11 +273,11 @@ where
     T: Debug + Send + Point,
     Vec<T>: Serialize,
 {
-    fn config(&self) -> Arc<StreamConfig> {
+    fn stream_config(&self) -> Arc<StreamConfig> {
         self.config.clone()
     }
 
-    fn stream(&self) -> Arc<String> {
+    fn stream_name(&self) -> Arc<String> {
         self.stream.clone()
     }
 
