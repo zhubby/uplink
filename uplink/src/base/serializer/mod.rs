@@ -555,10 +555,11 @@ fn construct_publish(data: Box<dyn Package>) -> Result<Publish, Error> {
     let batch_latency = data.latency();
     trace!("Data received on stream: {stream_name}; message count = {point_count}; batching latency = {batch_latency}");
 
-    let topic = data.stream_config().topic.clone();
+    let stream_config = data.stream_config();
+    let topic = stream_config.topic.clone();
     let mut payload = data.serialize()?;
 
-    if let Compression::Lz4 = data.compression() {
+    if let Compression::Lz4 = stream_config.compression {
         lz4_compress(&mut payload)?;
     }
 

@@ -296,10 +296,6 @@ where
     fn latency(&self) -> u64 {
         0
     }
-
-    fn compression(&self) -> Compression {
-        self.compression
-    }
 }
 
 impl<T> Clone for Stream<T> {

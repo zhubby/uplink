@@ -20,7 +20,7 @@ pub use self::{
     data_lane::{DataBridge, DataBridgeTx},
 };
 
-use super::{Compression, StreamConfig};
+use super::StreamConfig;
 pub use metrics::StreamMetrics;
 
 pub trait Point: Send + Debug {
@@ -40,7 +40,6 @@ pub trait Package: Send + Debug {
     fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    fn compression(&self) -> Compression;
 }
 
 // TODO Don't do any deserialization on payload. Read it a Vec<u8> which is in turn a json
