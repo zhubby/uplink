@@ -140,13 +140,16 @@ impl MqttClient for AsyncClient {
 
 struct StorageHandler {
     map: BTreeMap<Arc<StreamConfig>, Storage>,
+    // Stream being read from
+    read_stream: Option<Arc<StreamConfig>>,
 }
 
 impl StorageHandler {
     fn new(config: Arc<Config>) -> Result<Self, Error> {
         let mut map = BTreeMap::new();
         for (stream_name, stream_config) in config.streams.iter() {
-            let mut storage = Storage::new(stream_config.persistence.max_file_size);
+            let mut storage =
+                Storage::new(&stream_config.topic, stream_config.persistence.max_file_size);
             if stream_config.persistence.max_file_count > 0 {
                 let mut path = config.persistence_path.clone();
                 path.push(stream_name);
@@ -164,11 +167,13 @@ impl StorageHandler {
             map.insert(Arc::new(stream_config.clone()), storage);
         }
 
-        Ok(Self { map })
+        Ok(Self { map, read_stream: None })
     }
 
     fn select(&mut self, stream_config: Arc<StreamConfig>) -> &mut Storage {
-        self.map.entry(stream_config).or_insert_with(|| Storage::new(default_file_size()))
+        self.map
+            .entry(stream_config.to_owned())
+            .or_insert_with(|| Storage::new(&stream_config.topic, default_file_size()))
     }
 
     fn next(
@@ -178,12 +183,28 @@ impl StorageHandler {
         let storages = self.map.iter_mut();
 
         for (stream_config, storage) in storages {
-            match storage.reload_on_eof() {
-                // Done reading all the pending files
-                Ok(true) => continue,
-                Ok(false) => return Some((stream_config, storage)),
+            match (storage.reload_on_eof(), &mut self.read_stream) {
+                // Done reading all pending files for a persisted stream
+                (Ok(true), Some(curr_stream)) => {
+                    if curr_stream == stream_config {
+                        self.read_stream.take();
+                        debug!("Completed reading from: {}", stream_config.topic);
+                    }
+
+                    continue;
+                }
+                // Persisted stream is empty
+                (Ok(true), _) => continue,
+                // Reading from a newly loaded non-empty persisted stream
+                (Ok(false), None) => {
+                    debug!("Reading from: {}", stream_config.topic);
+                    self.read_stream = Some(stream_config.to_owned());
+                    return Some((stream_config, storage));
+                }
+                // Continuing to read from persisted stream loaded earlier
+                (Ok(false), _) => return Some((stream_config, storage)),
                 // Reload again on encountering a corrupted file
-                Err(e) => {
+                (Err(e), _) => {
                     metrics.increment_errors();
                     metrics.increment_lost_segments();
                     error!("Failed to reload from storage. Error = {e}");
@@ -859,7 +880,7 @@ mod test {
         let config = Arc::new(default_config());
 
         let (serializer, _, _) = defaults(config);
-        let mut storage = Storage::new(1024);
+        let mut storage = Storage::new("hello/world", 1024);
 
         let mut publish = Publish::new(
             "hello/world",
@@ -966,12 +987,12 @@ mod test {
         let config = Arc::new(default_config());
 
         let (mut serializer, data_tx, net_rx) = defaults(config);
-
+        let stream_config = Arc::new(Default::default());
         let mut storage = serializer
             .storage_handler
             .map
-            .entry(Arc::new(Default::default()))
-            .or_insert(Storage::new(1024));
+            .entry(stream_config)
+            .or_insert(Storage::new(stream_config, 1024));
 
         let mut collector = MockCollector::new(data_tx);
         // Run a collector practically once
@@ -1018,12 +1039,12 @@ mod test {
         let config = Arc::new(default_config());
 
         let (mut serializer, data_tx, _) = defaults(config);
-
-        let stream_config =
-            Arc::new(StreamConfig { topic: "hello/world".to_owned(), ..Default::default() });
-
-        let mut storage =
-            serializer.storage_handler.map.entry(stream_config).or_insert(Storage::new(1024));
+        let stream_config = Arc::new(Default::default());
+        let mut storage = serializer
+            .storage_handler
+            .map
+            .entry(stream_config)
+            .or_insert(Storage::new(stream_config, 1024));
 
         let mut collector = MockCollector::new(data_tx);
         // Run a collector
