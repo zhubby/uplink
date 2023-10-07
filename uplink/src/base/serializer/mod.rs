@@ -987,12 +987,13 @@ mod test {
         let config = Arc::new(default_config());
 
         let (mut serializer, data_tx, net_rx) = defaults(config);
-        let stream_config = Arc::new(Default::default());
+        let stream_config =
+            Arc::new(StreamConfig { topic: "hello/world".to_string(), ..Default::default() });
         let mut storage = serializer
             .storage_handler
             .map
-            .entry(stream_config)
-            .or_insert(Storage::new(stream_config, 1024));
+            .entry(stream_config.to_owned())
+            .or_insert(Storage::new(&stream_config.topic, 1024));
 
         let mut collector = MockCollector::new(data_tx);
         // Run a collector practically once
@@ -1039,12 +1040,13 @@ mod test {
         let config = Arc::new(default_config());
 
         let (mut serializer, data_tx, _) = defaults(config);
-        let stream_config = Arc::new(Default::default());
+        let stream_config =
+            Arc::new(StreamConfig { topic: "hello/world".to_string(), ..Default::default() });
         let mut storage = serializer
             .storage_handler
             .map
-            .entry(stream_config)
-            .or_insert(Storage::new(stream_config, 1024));
+            .entry(stream_config.to_owned())
+            .or_insert(Storage::new(&stream_config.topic, 1024));
 
         let mut collector = MockCollector::new(data_tx);
         // Run a collector
