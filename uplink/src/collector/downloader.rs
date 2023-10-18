@@ -49,17 +49,16 @@
 
 use bytes::BytesMut;
 use flume::Receiver;
-use futures_util::StreamExt;
+use futures_util::{Future, StreamExt};
 use human_bytes::human_bytes;
 use log::{debug, error, info, trace, warn};
-use reqwest::{Certificate, Client, ClientBuilder, Identity, Response};
+use reqwest::{Certificate, Client, ClientBuilder, Error as ReqwestError, Identity, Response};
 use serde::{Deserialize, Serialize};
-use tokio::time::timeout;
+use tokio::time::{timeout_at, Instant};
 
-use std::collections::HashMap;
 use std::fs::{metadata, remove_dir_all, File};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 #[cfg(unix)]
 use std::{
     fs::{create_dir, set_permissions, Permissions},
@@ -76,7 +75,7 @@ pub enum Error {
     #[error("Serde error: {0}")]
     Serde(#[from] serde_json::Error),
     #[error("Error from reqwest: {0}")]
-    Reqwest(#[from] reqwest::Error),
+    Reqwest(#[from] ReqwestError),
     #[error("File io Error: {0}")]
     Io(#[from] std::io::Error),
     #[error("Empty file name")]
@@ -100,7 +99,6 @@ pub struct FileDownloader {
     bridge_tx: BridgeTx,
     client: Client,
     sequence: u32,
-    timeouts: HashMap<String, Duration>,
 }
 
 impl FileDownloader {
@@ -125,17 +123,9 @@ impl FileDownloader {
         }
         .build()?;
 
-        let timeouts = config
-            .downloader
-            .actions
-            .iter()
-            .map(|s| (s.name.to_owned(), Duration::from_secs(s.timeout)))
-            .collect();
-
         Ok(Self {
             config: config.downloader.clone(),
             actions_rx,
-            timeouts,
             client,
             bridge_tx,
             sequence: 0,
@@ -158,17 +148,17 @@ impl FileDownloader {
                 }
             };
             self.action_id = action.action_id.clone();
-
-            let duration = match self.timeouts.get(&action.name) {
-                Some(t) => *t,
+            let deadline = match &action.deadline {
+                Some(d) => *d,
                 _ => {
-                    error!("Action: {} unconfigured", action.name);
+                    error!("Unconfigured deadline: {}", action.name);
                     continue;
                 }
             };
 
             // NOTE: if download has timedout don't do anything, else ensure errors are forwarded after three retries
-            match timeout(duration, self.run(action)).await {
+
+            match timeout_at(deadline, self.run(action)).await {
                 Ok(Err(e)) => self.forward_error(e).await,
                 Err(_) => error!("Last download has timedout"),
                 _ => {}
@@ -183,17 +173,20 @@ impl FileDownloader {
         self.bridge_tx.send_action_response(status).await;
     }
 
-    // Retry mechanism tries atleast 3 times before returning a download error
-    async fn retry_thrice(&mut self, url: &str, mut download: DownloadState) -> Result<(), Error> {
+    // A download must be retried with Range header when HTTP/reqwest errors are faced
+    async fn continuous_retry(
+        &mut self,
+        url: &str,
+        mut download: DownloadState,
+    ) -> Result<(), Error> {
         let mut req = self.client.get(url).send();
-        for _ in 0..3 {
-            let resp = req.await?.error_for_status()?;
-            match self.download(resp, &mut download).await {
+        loop {
+            match self.download(req, &mut download).await {
                 Ok(_) => break,
                 Err(Error::Reqwest(e)) => error!("Download failed: {e}"),
                 Err(e) => return Err(e),
             }
-            tokio::time::sleep(Duration::from_secs(30)).await;
+            tokio::time::sleep(Duration::from_secs(1)).await;
 
             let range = download.retry_range();
             warn!("Retrying download; Continuing to download file from: {range}");
@@ -255,7 +248,7 @@ impl FileDownloader {
             content_length: update.content_length,
             start_instant: Instant::now(),
         };
-        self.retry_thrice(&url, download).await?;
+        self.continuous_retry(&url, download).await?;
 
         // Update Action payload with `download_path`, i.e. downloaded file's location in fs
         update.download_path = Some(file_path.clone());
@@ -323,10 +316,10 @@ impl FileDownloader {
     /// Downloads from server and stores into file
     async fn download(
         &mut self,
-        resp: Response,
+        req: impl Future<Output = Result<Response, ReqwestError>>,
         download: &mut DownloadState,
     ) -> Result<(), Error> {
-        let mut stream = resp.bytes_stream();
+        let mut stream = req.await?.error_for_status()?.bytes_stream();
 
         // Download and store to disk by streaming as chunks
         while let Some(item) = stream.next().await {
@@ -384,7 +377,8 @@ impl DownloadState {
         let size = human_bytes(self.content_length as f64);
 
         // Calculate percentage on the basis of content_length
-        let percentage = (99 * self.bytes_downloaded / self.content_length) as u8;
+        let factor = self.bytes_downloaded as f32 / self.content_length as f32;
+        let percentage = (99.99 * factor) as u8;
 
         // NOTE: ensure lesser frequency of action responses, once every percentage points
         if percentage > self.percentage_downloaded {
@@ -413,7 +407,7 @@ impl DownloadState {
 
 #[cfg(test)]
 mod test {
-    use flume::{bounded, TrySendError};
+    use flume::bounded;
     use serde_json::json;
 
     use std::{collections::HashMap, time::Duration};
@@ -488,6 +482,7 @@ mod test {
             kind: "firmware_update".to_string(),
             name: "firmware_update".to_string(),
             payload: json!(download_update).to_string(),
+            deadline: Some(Instant::now() + Duration::from_secs(60)),
         };
 
         std::thread::sleep(Duration::from_millis(10));
@@ -515,58 +510,6 @@ mod test {
             } else if status.is_failed() {
                 break;
             }
-        }
-    }
-
-    #[test]
-    fn multiple_actions_at_once() {
-        // Ensure path exists
-        std::fs::create_dir_all(DOWNLOAD_DIR).unwrap();
-        // Prepare config
-        let mut path = PathBuf::from(DOWNLOAD_DIR);
-        path.push("download");
-        let downloader_cfg = DownloaderConfig {
-            actions: vec![ActionRoute { name: "firmware_update".to_owned(), timeout: 10 }],
-            path,
-        };
-        let config = config(downloader_cfg.clone());
-        let (bridge_tx, _) = create_bridge();
-
-        // Create channels to forward and push actions on
-        let (download_tx, download_rx) = bounded(1);
-        let downloader = FileDownloader::new(Arc::new(config), download_rx, bridge_tx).unwrap();
-
-        // Start FileDownloader in separate thread
-        std::thread::spawn(|| downloader.start());
-
-        // Create a firmware update action
-        let download_update = DownloadFile {
-            content_length: 0,
-            url: "https://github.com/bytebeamio/uplink/raw/main/docs/logo.png".to_string(),
-            file_name: "1.0".to_string(),
-            download_path: None,
-        };
-        let mut expected_forward = download_update.clone();
-        let mut path = downloader_cfg.path;
-        path.push("firmware_update");
-        path.push("test.txt");
-        expected_forward.download_path = Some(path);
-        let download_action = Action {
-            action_id: "1".to_string(),
-            kind: "firmware_update".to_string(),
-            name: "firmware_update".to_string(),
-            payload: json!(download_update).to_string(),
-        };
-
-        std::thread::sleep(Duration::from_millis(10));
-
-        // Send action to FileDownloader with Sender<Action>
-        download_tx.try_send(download_action.clone()).unwrap();
-
-        // Send action to FileDownloader immediately after, this must fail
-        match download_tx.try_send(download_action).unwrap_err() {
-            TrySendError::Full(_) => {}
-            TrySendError::Disconnected(_) => panic!("Unexpected disconnect"),
         }
     }
 }

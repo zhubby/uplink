@@ -76,7 +76,12 @@ impl ActionsBridge {
         let (ctrl_tx, ctrl_rx) = bounded(1);
 
         let mut streams_config = HashMap::new();
-        streams_config.insert("action_status".to_owned(), config.action_status.clone());
+        let mut action_status = config.action_status.clone();
+        if action_status.buf_size > 1 {
+            warn!("Buffer size of `action_status` stream restricted to 1")
+        }
+        action_status.buf_size = 1;
+        streams_config.insert("action_status".to_owned(), action_status);
         let mut streams = Streams::new(config.clone(), package_tx, metrics_tx);
         streams.config_streams(streams_config);
 
@@ -259,14 +264,14 @@ impl ActionsBridge {
             .get(&action.name)
             .ok_or_else(|| Error::NoRoute(action.name.clone()))?;
 
-        let duration = route.try_send(action.clone()).map_err(|_| Error::UnresponsiveReceiver)?;
+        let deadline = route.try_send(action.clone()).map_err(|_| Error::UnresponsiveReceiver)?;
         // current action left unchanged in case of new tunshell action
         if action.name == TUNSHELL_ACTION {
             self.parallel_actions.insert(action.action_id);
             return Ok(());
         }
 
-        self.current_action = Some(CurrentAction::new(action, duration));
+        self.current_action = Some(CurrentAction::new(action, deadline));
 
         Ok(())
     }
@@ -373,11 +378,11 @@ struct CurrentAction {
 }
 
 impl CurrentAction {
-    pub fn new(action: Action, duration: Duration) -> CurrentAction {
+    pub fn new(action: Action, deadline: Instant) -> CurrentAction {
         CurrentAction {
             id: action.action_id.clone(),
             action,
-            timeout: Box::pin(time::sleep(duration)),
+            timeout: Box::pin(time::sleep_until(deadline)),
         }
     }
 
@@ -411,10 +416,13 @@ pub struct ActionRouter {
 
 impl ActionRouter {
     #[allow(clippy::result_large_err)]
-    pub fn try_send(&self, action: Action) -> Result<Duration, TrySendError<Action>> {
+    /// Forwards action to the appropriate application and returns the instance in time at which it should be timedout if incomplete
+    pub fn try_send(&self, mut action: Action) -> Result<Instant, TrySendError<Action>> {
+        let deadline = Instant::now() + self.duration;
+        action.deadline = Some(deadline);
         self.actions_tx.try_send(action)?;
 
-        Ok(self.duration)
+        Ok(deadline)
     }
 }
 
@@ -539,6 +547,7 @@ mod tests {
             kind: "test".to_string(),
             name: "route_1".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action_1).unwrap();
 
@@ -562,6 +571,7 @@ mod tests {
             kind: "test".to_string(),
             name: "route_2".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action_2).unwrap();
 
@@ -605,6 +615,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action_1).unwrap();
 
@@ -619,6 +630,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action_2).unwrap();
 
@@ -659,6 +671,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
@@ -722,6 +735,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
@@ -790,6 +804,7 @@ mod tests {
             kind: "tunshell".to_string(),
             name: "launch_shell".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
@@ -800,6 +815,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
@@ -878,6 +894,7 @@ mod tests {
             kind: "test".to_string(),
             name: "test".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
@@ -888,6 +905,7 @@ mod tests {
             kind: "tunshell".to_string(),
             name: "launch_shell".to_string(),
             payload: "test".to_string(),
+            deadline: None,
         };
         actions_tx.send(action).unwrap();
 
